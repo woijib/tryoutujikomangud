@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aplikasi Try Out</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/jspdf@latest/dist/jspdf.umd.min.js"></script>
+    <script src="https://unpkg.com/html2canvas@latest/dist/html2canvas.min.js"></script>
+    <style>
+        .fade-in {
+            animation: fadeIn 0.3s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .pulse-warning {
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .card-hover {
+            transition: all 0.3s ease;
+        }
+        
+        .card-hover:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 3px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div id="app"></div>
+
+    <script>
+        // Global state
+        let teknisQuestions = [];
+        let mansoskulQuestions = [];
+        let allQuestions = [];
+        let currentQuestion = 0;
+        let userAnswers = {};
+        let showResult = false;
+        let examResult = null;
+        let startTime = null;
+        let elapsedTime = 0;
+        let isExamStarted = false;
+        let uploadError = '';
+        let randomSeed = '';
+        let timeLeft = 90 * 60; // 90 minutes
+        let expandedCards = {};
+        let timerInterval = null;
+
+        // Utility functions
+        const formatTime = (seconds) => {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        };
+
+        const seededRandom = (seed) => {
+            let hash = 0;
+            for (let i = 0; i < seed.length; i++) {
+                const char = seed.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
+            }
+            return () => {
+                hash = (hash * 9301 + 49297) % 233280;
+                return hash / 233280;
+            };
+        };
+
+        const shuffleArray = (array, seed) => {
+            const random = seededRandom(seed);
+            const shuffled = [...array];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = Math.floor(random() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            return shuffled;
+        };
+
+        const truncateText = (text, maxLines = 3) => {
+            const lines = text.split('\n');
+            if (lines.length <= maxLines) return text;
+            return lines.slice(0, maxLines).join('\n') + '...';
+        };
+
+        const toggleCardExpansion = (index) => {
+            expandedCards[index] = !expandedCards[index];
+            render();
+        };
+
+        const getQuestionStatus = (index) => {
+            if (userAnswers[index]) return 'answered';
+            if (index === currentQuestion) return 'current';
+            return 'unanswered';
+        };
+
+        // File handling
+        const handleFileUpload = (event, type) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            uploadError = '';
+            const reader = new FileReader();
+            
+            reader.onload = (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+                    const parsedQuestions = jsonData
+                        .filter(row => row[0] && typeof row[0] === 'number')
+                        .map(row => {
+                            // Clean correct answer - ensure it's a single uppercase letter
+                            let correctAnswer = (row[6] || '').toString().trim().toUpperCase();
+                            if (correctAnswer.length > 1) {
+                                correctAnswer = correctAnswer.charAt(0);
+                            }
+                            // Validate it's A-D
+                            if (!['A', 'B', 'C', 'D'].includes(correctAnswer)) {
+                                correctAnswer = 'A'; // Default fallback
+                            }
+                            
+                            return {
+                                nomor: row[0],
+                                soal: row[1] || '',
+                                options: [row[2] || '', row[3] || '', row[4] || '', row[5] || ''],
+                                correctAnswer: correctAnswer,
+                                pembahasan: row[7] || '',
+                                category: type === 'teknis' ? 'Teknis' : 'Mansoskul'
+                            };
+                        });
+
+                    if (parsedQuestions.length === 0) {
+                        uploadError = `Tidak ada soal ${type} yang valid ditemukan dalam file.`;
+                        render();
+                        return;
+                    }
+
+                    if (type === 'teknis') {
+                        if (parsedQuestions.length < 50) {
+                            uploadError = 'File Teknis harus memiliki minimal 50 soal.';
+                            render();
+                            return;
+                        }
+                        teknisQuestions = parsedQuestions;
+                    } else {
+                        if (parsedQuestions.length < 20) {
+                            uploadError = 'File Mansoskul harus memiliki minimal 20 soal.';
+                            render();
+                            return;
+                        }
+                        mansoskulQuestions = parsedQuestions;
+                    }
+                    uploadError = '';
+                    render();
+                } catch (error) {
+                    uploadError = `Gagal memproses file ${type}. Pastikan file Excel valid.`;
+                    console.error('Error parsing file:', error);
+                    render();
+                }
+            };
+
+            reader.readAsArrayBuffer(file);
+        };
+
+        // Timer functions
+        const startTimer = () => {
+            if (timerInterval) clearInterval(timerInterval);
+            
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                elapsedTime = Math.floor((new Date().getTime() - startTime.getTime()) / 1000);
+                
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    submitExam();
+                }
+                
+                render();
+            }, 1000);
+        };
+
+        const stopTimer = () => {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+        };
+
+        // Auto-save to localStorage
+        const autoSave = () => {
+            if (isExamStarted && !showResult) {
+                const state = {
+                    userAnswers,
+                    currentQuestion,
+                    elapsedTime,
+                    timeLeft,
+                    timestamp: new Date().toISOString()
+                };
+                localStorage.setItem('tryoutState', JSON.stringify(state));
+            }
+        };
+
+        // Load from localStorage
+        const loadSavedState = () => {
+            const savedState = localStorage.getItem('tryoutState');
+            if (savedState) {
+                try {
+                    const state = JSON.parse(savedState);
+                    if (confirm('Ditemukan progress yang tersimpan. Apakah ingin melanjutkan?')) {
+                        userAnswers = state.userAnswers || {};
+                        currentQuestion = state.currentQuestion || 0;
+                        elapsedTime = state.elapsedTime || 0;
+                        timeLeft = state.timeLeft || 90 * 60;
+                        isExamStarted = true;
+                        startTime = new Date(Date.now() - (elapsedTime * 1000));
+                        startTimer();
+                        render();
+                    }
+                } catch (error) {
+                    console.error('Error loading saved state:', error);
+                }
+            }
+        };
+
+        // Exam functions
+        const startExam = () => {
+            if (teknisQuestions.length < 50 || mansoskulQuestions.length < 20) {
+                uploadError = 'Pastikan kedua file sudah diupload dengan jumlah soal yang cukup.';
+                render();
+                return;
+            }
+
+            const seed = randomSeed || Date.now().toString();
+            const shuffledTeknis = shuffleArray(teknisQuestions, seed).slice(0, 50);
+            const shuffledMansoskul = shuffleArray(mansoskulQuestions, seed).slice(0, 20);
+            
+            allQuestions = [
+                ...shuffledTeknis.map(q => ({ ...q, category: 'Teknis' })),
+                ...shuffledMansoskul.map(q => ({ ...q, category: 'Mansoskul' }))
+            ];
+
+            currentQuestion = 0;
+            userAnswers = {};
+            showResult = false;
+            examResult = null;
+            startTime = new Date();
+            elapsedTime = 0;
+            timeLeft = 90 * 60;
+            isExamStarted = true;
+            expandedCards = {};
+            
+            localStorage.removeItem('tryoutState');
+            startTimer();
+            render();
+        };
+
+        const handleAnswerSelect = (answer) => {
+            userAnswers[currentQuestion] = answer;
+            autoSave();
+            render();
+        };
+
+        const nextQuestion = () => {
+            if (currentQuestion < allQuestions.length - 1) {
+                currentQuestion++;
+                render();
+            }
+        };
+
+        const previousQuestion = () => {
+            if (currentQuestion > 0) {
+                currentQuestion--;
+                render();
+            }
+        };
+
+        const goToQuestion = (questionNumber) => {
+            currentQuestion = questionNumber;
+            render();
+        };
+
+        const calculateResults = () => {
+            let technisCorrect = 0;
+            let mansoskulCorrect = 0;
+            let technisTotal = 0;
+            let mansoskulTotal = 0;
+            const userAnswersList = [];
+
+            allQuestions.forEach((question, index) => {
+                const userAnswer = userAnswers[index];
+                const isCorrect = userAnswer === question.correctAnswer;
+                
+                if (question.category === 'Teknis') {
+                    technisTotal++;
+                    if (isCorrect) technisCorrect++;
+                } else {
+                    mansoskulTotal++;
+                    if (isCorrect) mansoskulCorrect++;
+                }
+
+                const selectedAnswerText = userAnswer && userAnswer.length === 1 && 
+                    userAnswer >= 'A' && userAnswer <= 'Z' && 
+                    question.options[userAnswer.charCodeAt(0) - 65] ? 
+                    question.options[userAnswer.charCodeAt(0) - 65] : 'Tidak dijawab';
+                const correctAnswerText = question.correctAnswer && 
+                    question.options[question.correctAnswer.charCodeAt(0) - 65] ? 
+                    question.options[question.correctAnswer.charCodeAt(0) - 65] : 'Tidak ada jawaban benar';
+
+                userAnswersList.push({
+                    questionNumber: question.nomor,
+                    selectedAnswer: userAnswer || 'Tidak dijawab',
+                    isCorrect,
+                    selectedAnswerText,
+                    correctAnswerText,
+                    question: question.soal,
+                    section: question.category
+                });
+            });
+
+            const totalCorrect = technisCorrect + mansoskulCorrect;
+            const totalScore = totalCorrect; // 1 poin per soal
+            const technisScore = technisCorrect;
+            const mansoskulScore = mansoskulCorrect;
+
+            return {
+                totalScore,
+                technisScore,
+                mansoskulScore,
+                totalQuestions: allQuestions.length,
+                correctAnswers: totalCorrect,
+                technisCorrect,
+                mansoskulCorrect,
+                technisTotal,
+                mansoskulTotal,
+                percentage: Math.round((totalCorrect / allQuestions.length) * 100),
+                timeSpent: elapsedTime,
+                userAnswers: userAnswersList
+            };
+        };
+
+        const submitExam = () => {
+            const answeredCount = Object.keys(userAnswers).length;
+            const totalCount = allQuestions.length;
+            const unansweredCount = totalCount - answeredCount;
+            
+            let confirmMessage = `Apakah Anda yakin ingin menyelesaikan try out?\n\n`;
+            confirmMessage += `📊 Statistik Jawaban:\n`;
+            confirmMessage += `✅ Terjawab: ${answeredCount} soal\n`;
+            confirmMessage += `❓ Belum terjawab: ${unansweredCount} soal\n`;
+            confirmMessage += `📈 Progress: ${Math.round((answeredCount / totalCount) * 100)}%\n\n`;
+            
+            if (unansweredCount > 0) {
+                confirmMessage += `⚠️ Ada ${unansweredCount} soal yang belum dijawab.\n`;
+                confirmMessage += `Semua soal yang belum dijawab akan dianggap salah.\n\n`;
+            }
+            
+            confirmMessage += `Yakin ingin melanjutkan?`;
+            
+            if (confirm(confirmMessage)) {
+                const result = calculateResults();
+                examResult = result;
+                showResult = true;
+                stopTimer();
+                localStorage.removeItem('tryoutState');
+                render();
+            }
+        };
+
+        const resetExam = () => {
+            teknisQuestions = [];
+            mansoskulQuestions = [];
+            allQuestions = [];
+            currentQuestion = 0;
+            userAnswers = {};
+            showResult = false;
+            examResult = null;
+            startTime = null;
+            elapsedTime = 0;
+            timeLeft = 90 * 60;
+            isExamStarted = false;
+            uploadError = '';
+            randomSeed = '';
+            expandedCards = {};
+            stopTimer();
+            localStorage.removeItem('tryoutState');
+            render();
+        };
+
+        // Export functions
+        const exportToCSV = () => {
+            if (!examResult) return;
+
+            const csvContent = [
+                ['No', 'Section', 'Soal', 'Jawaban Anda (Huruf)', 'Jawaban Anda (Teks)', 'Jawaban Benar (Huruf)', 'Jawaban Benar (Teks)', 'Benar/Tidak'],
+                ...examResult.userAnswers.map(answer => [
+                    answer.questionNumber,
+                    answer.section,
+                    answer.question,
+                    answer.selectedAnswer,
+                    answer.selectedAnswerText,
+                    allQuestions.find(q => q.nomor === answer.questionNumber)?.correctAnswer || '',
+                    answer.correctAnswerText,
+                    answer.isCorrect ? 'Benar' : 'Salah'
+                ])
+            ].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
+
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `hasil-tryout-${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        const exportToPDF = async () => {
+            if (!examResult) {
+                alert('Tidak ada hasil untuk diekspor');
+                return;
+            }
+
+            try {
+                // Check if libraries are loaded
+                if (typeof window.jspdf === 'undefined') {
+                    throw new Error('Library jsPDF tidak terload');
+                }
+                if (typeof window.html2canvas === 'undefined') {
+                    throw new Error('Library html2canvas tidak terload');
+                }
+
+                const element = document.getElementById('results-content');
+                if (!element) {
+                    throw new Error('Konten hasil tidak ditemukan');
+                }
+
+                // Show loading indicator
+                const button = event.target;
+                const originalText = button.innerHTML;
+                button.innerHTML = '🔄 Membuat PDF...';
+                button.disabled = true;
+
+                console.log('Starting PDF generation...');
+
+                // Configure html2canvas options
+                const canvas = await html2canvas(element, {
+                    scale: 2,
+                    useCORS: true,
+                    allowTaint: true,
+                    backgroundColor: '#ffffff',
+                    logging: false,
+                    width: element.scrollWidth,
+                    height: element.scrollHeight,
+                    windowWidth: element.scrollWidth,
+                    windowHeight: element.scrollHeight
+                });
+                
+                console.log('Canvas created successfully');
+
+                const imgData = canvas.toDataURL('image/png', 1.0);
+                const { jsPDF } = window.jspdf;
+                const pdf = new jsPDF({
+                    orientation: 'portrait',
+                    unit: 'mm',
+                    format: 'a4'
+                });
+
+                const imgWidth = 210; // A4 width in mm
+                const pageHeight = 297; // A4 height in mm
+                const imgHeight = (canvas.height * imgWidth) / canvas.width;
+                let heightLeft = imgHeight;
+                let position = 0;
+
+                // Add first page
+                pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                heightLeft -= pageHeight;
+
+                // Add additional pages if needed
+                while (heightLeft >= 0) {
+                    position = heightLeft - imgHeight;
+                    pdf.addPage();
+                    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                    heightLeft -= pageHeight;
+                }
+
+                // Generate filename with timestamp
+                const timestamp = new Date().toLocaleDateString('id-ID', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric'
+                }).replace(/\//g, '-');
+                
+                const filename = `Hasil Tryout - ${timestamp}.pdf`;
+                pdf.save(filename);
+
+                console.log('PDF saved successfully');
+                
+                // Restore button
+                button.innerHTML = originalText;
+                button.disabled = false;
+
+            } catch (error) {
+                console.error('Error generating PDF:', error);
+                
+                // Restore button
+                const button = event.target;
+                button.innerHTML = originalText;
+                button.disabled = false;
+
+                // Show user-friendly error message with fallback options
+                let errorMessage = 'Gagal membuat PDF. ';
+                
+                if (error.message.includes('jsPDF')) {
+                    errorMessage += 'Library jsPDF tidak terload. ';
+                } else if (error.message.includes('html2canvas')) {
+                    errorMessage += 'Library html2canvas tidak terload. ';
+                } else if (error.message.includes('Konten hasil tidak ditemukan')) {
+                    errorMessage += 'Konten hasil tidak ditemukan. ';
+                } else {
+                    errorMessage += 'Terjadi kesalahan teknis. ';
+                }
+                
+                errorMessage += '\n\nAlternatif:\n1. Gunakan Export CSV (lebih stabil)\n2. Gunakan Print Browser (Ctrl+P)\n3. Refresh halaman dan coba lagi';
+                
+                if (confirm(errorMessage + '\n\nApakah ingin mencoba print browser?')) {
+                    // Fallback to browser print
+                    const printWindow = window.open('', '_blank');
+                    const element = document.getElementById('results-content');
+                    if (element && printWindow) {
+                        printWindow.document.write(`
+                            <!DOCTYPE html>
+                            <html>
+                            <head>
+                                <title>Hasil Try Out</title>
+                                <style>
+                                    body { font-family: Arial, sans-serif; margin: 20px; }
+                                    .card { border: 1px solid #ddd; margin: 10px 0; padding: 15px; }
+                                    .correct { background-color: #f0f9ff; }
+                                    .wrong { background-color: #fef2f2; }
+                                    .explanation { background-color: #fefce8; padding: 10px; margin: 10px 0; }
+                                    @media print { body { margin: 10px; } }
+                                </style>
+                            </head>
+                            <body>
+                                <h1>Hasil Try Out - ${new Date().toLocaleDateString('id-ID')}</h1>
+                                ${element.innerHTML}
+                            </body>
+                            </html>
+                        `);
+                        printWindow.document.close();
+                        printWindow.print();
+                    }
+                }
+            }
+        };
+
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            if (!isExamStarted || showResult) return;
+            
+            if (e.key === 'ArrowLeft') {
+                previousQuestion();
+            } else if (e.key === 'ArrowRight') {
+                nextQuestion();
+            } else if (e.ctrlKey && e.key === 'Enter') {
+                submitExam();
+            }
+        });
+
+        // Prevent accidental page leave
+        window.addEventListener('beforeunload', (e) => {
+            if (isExamStarted && !showResult) {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+
+        // Render functions
+        const renderUploadScreen = () => {
+            return `
+                <div class="min-h-screen bg-gray-50 p-4">
+                    <div class="max-w-4xl mx-auto">
+                        <div class="bg-white shadow-xl rounded-lg">
+                            <div class="p-6 text-center border-b">
+                                <h1 class="text-3xl font-bold text-blue-900 mb-2">Aplikasi Try Out</h1>
+                                <p class="text-gray-600">Upload file Excel untuk memulai try out</p>
+                            </div>
+                            <div class="p-6 space-y-6">
+                                <div class="grid md:grid-cols-2 gap-6">
+                                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center card-hover">
+                                        <div class="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                            <svg class="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-lg font-medium text-blue-900">File Soal Teknis</label>
+                                            <p class="text-sm text-gray-500">Minimal 50 soal</p>
+                                        </div>
+                                        <input type="file" accept=".xlsx,.xls" onchange="handleFileUpload(event, 'teknis')" class="mt-4 mx-auto max-w-xs">
+                                        ${teknisQuestions.length > 0 ? `
+                                            <div class="mt-4 text-green-600 font-medium">✓ ${teknisQuestions.length} soal terupload</div>
+                                        ` : ''}
+                                    </div>
+
+                                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center card-hover">
+                                        <div class="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                            <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-lg font-medium text-purple-900">File Soal Mansoskul</label>
+                                            <p class="text-sm text-gray-500">Minimal 20 soal</p>
+                                        </div>
+                                        <input type="file" accept=".xlsx,.xls" onchange="handleFileUpload(event, 'mansoskul')" class="mt-4 mx-auto max-w-xs">
+                                        ${mansoskulQuestions.length > 0 ? `
+                                            <div class="mt-4 text-green-600 font-medium">✓ ${mansoskulQuestions.length} soal terupload</div>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                                
+                                ${uploadError ? `
+                                    <div class="bg-red-50 border border-red-200 rounded-lg p-4">
+                                        <div class="flex items-center">
+                                            <svg class="w-5 h-5 text-red-500 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+                                            </svg>
+                                            <span class="text-red-700">${uploadError}</span>
+                                        </div>
+                                    </div>
+                                ` : ''}
+
+                                <div class="bg-blue-50 p-4 rounded-lg">
+                                    <h3 class="font-semibold text-blue-900 mb-2">Petunjuk Format File:</h3>
+                                    <div class="text-sm text-blue-800 space-y-1">
+                                        <p>• Kolom A: Nomor Soal</p>
+                                        <p>• Kolom B: Pertanyaan</p>
+                                        <p>• Kolom C-F: Opsi Jawaban (A, B, C, D)</p>
+                                        <p>• Kolom G: Kunci Jawaban (A/B/C/D)</p>
+                                        <p>• Kolom H: Pembahasan (opsional)</p>
+                                    </div>
+                                </div>
+
+                                ${teknisQuestions.length >= 50 && mansoskulQuestions.length >= 20 ? `
+                                    <div class="space-y-4">
+                                        <div class="flex items-center space-x-2">
+                                            <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                            </svg>
+                                            <label>Random Seed (opsional):</label>
+                                            <input type="text" value="${randomSeed}" onchange="randomSeed = this.value" placeholder="Kosongkan untuk acak otomatis" class="max-w-xs px-3 py-2 border border-gray-300 rounded-md">
+                                        </div>
+                                        <button onclick="startExam()" class="w-full bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition font-medium">
+                                            <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            Mulai Try Out
+                                        </button>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderConfirmScreen = () => {
+            return `
+                <div class="min-h-screen bg-gray-50 p-4">
+                    <div class="max-w-4xl mx-auto">
+                        <div class="bg-white shadow-xl rounded-lg">
+                            <div class="p-6 text-center border-b">
+                                <h1 class="text-3xl font-bold text-blue-900 mb-2">Konfirmasi Mulai Try Out</h1>
+                            </div>
+                            <div class="p-6 space-y-6">
+                                <div class="bg-blue-50 p-4 rounded-lg">
+                                    <h3 class="font-semibold text-blue-900 mb-2">Detail Try Out:</h3>
+                                    <div class="text-sm text-blue-800 space-y-1">
+                                        <p>• Total Soal: 70 (50 Teknis + 20 Mansoskul)</p>
+                                        <p>• Soal Teknis tersedia: ${teknisQuestions.length}</p>
+                                        <p>• Soal Mansoskul tersedia: ${mansoskulQuestions.length}</p>
+                                        <p>• Waktu: 90 menit</p>
+                                        <p>• Skor maksimal: 70</p>
+                                    </div>
+                                </div>
+                                
+                                <div class="bg-yellow-50 p-4 rounded-lg">
+                                    <h3 class="font-semibold text-yellow-900 mb-2">Petunjuk:</h3>
+                                    <div class="text-sm text-yellow-800 space-y-1">
+                                        <p>• Jawab semua soal dengan teliti</p>
+                                        <p>• Gunakan navigasi untuk berpindah soal</p>
+                                        <p>• Periksa kembali jawaban sebelum submit</p>
+                                        <p>• Hasil akan ditampilkan setelah submit</p>
+                                    </div>
+                                </div>
+
+                                <div class="space-y-4">
+                                    <div class="flex items-center space-x-2">
+                                        <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                        </svg>
+                                        <label>Random Seed (opsional):</label>
+                                        <input type="text" value="${randomSeed}" onchange="randomSeed = this.value" placeholder="Kosongkan untuk acak otomatis" class="max-w-xs px-3 py-2 border border-gray-300 rounded-md">
+                                    </div>
+                                    <div class="flex gap-3">
+                                        <button onclick="startExam()" class="flex-1 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition font-medium">
+                                            <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            Mulai Try Out
+                                        </button>
+                                        <button onclick="resetExam()" class="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 transition font-medium">
+                                            Upload Ulang
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderExamScreen = () => {
+            const currentQ = allQuestions[currentQuestion];
+            const progress = ((Object.keys(userAnswers).length) / allQuestions.length) * 100;
+            const isTimeWarning = timeLeft <= 600; // 10 minutes
+
+            return `
+                <div class="min-h-screen bg-gray-50 p-4">
+                    <div class="max-w-7xl mx-auto">
+                        <!-- Header -->
+                        <div class="bg-white shadow-lg mb-4 rounded-lg ${isTimeWarning ? 'border-red-300 bg-red-50' : ''}">
+                            <div class="p-4">
+                                <div class="flex flex-col sm:flex-row justify-between items-center gap-4">
+                                    <div class="flex items-center space-x-4">
+                                        <span class="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm">
+                                            Soal ${currentQuestion + 1}/${allQuestions.length}
+                                        </span>
+                                        <span class="px-3 py-1 ${currentQ.category === 'Teknis' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'} rounded-full text-sm">
+                                            ${currentQ.category}
+                                        </span>
+                                        <span class="px-3 py-1 bg-gray-200 text-gray-600 rounded-full text-xs">
+                                            No. Asli: ${currentQ.nomor}
+                                        </span>
+                                    </div>
+                                    <div class="flex items-center space-x-4">
+                                        <div class="flex items-center space-x-2 text-sm font-medium ${isTimeWarning ? 'text-red-600' : 'text-gray-600'}">
+                                            <svg class="w-4 h-4 ${isTimeWarning ? 'pulse-warning' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <span>${formatTime(timeLeft)}</span>
+                                            ${isTimeWarning ? `
+                                                <span class="px-2 py-1 bg-red-100 text-red-800 rounded text-xs">⚠️ 10 menit tersisa!</span>
+                                            ` : ''}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="mt-4">
+                                    <div class="w-full bg-gray-200 rounded-full h-2">
+                                        <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: ${progress}%"></div>
+                                    </div>
+                                    <p class="text-xs text-gray-500 mt-1">
+                                        ${Object.keys(userAnswers).length} dari ${allQuestions.length} soal dijawab
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Main Content with Navigation -->
+                        <div class="flex flex-col lg:flex-row gap-4">
+                            <!-- Question Section -->
+                            <div class="flex-1">
+                                <div class="bg-white shadow-lg rounded-lg">
+                                    <div class="p-6 border-b">
+                                        <h2 class="text-lg font-semibold">Soal Nomor ${currentQuestion + 1}</h2>
+                                        <p class="text-sm text-gray-500">Nomor asli: ${currentQ.nomor}</p>
+                                    </div>
+                                    <div class="p-6 space-y-6">
+                                        <div class="bg-gray-50 p-4 rounded-lg">
+                                            <p class="text-gray-800 leading-relaxed">${currentQ.soal}</p>
+                                        </div>
+
+                                        <div class="space-y-3">
+                                            ${currentQ.options.map((option, index) => {
+                                                const optionLetter = String.fromCharCode(65 + index);
+                                                const isSelected = userAnswers[currentQuestion] === optionLetter;
+                                                return `
+                                                    <label class="flex items-center space-x-3 p-3 rounded-lg border hover:bg-gray-50 cursor-pointer transition ${isSelected ? 'bg-blue-50 border-blue-300' : 'border-gray-200'}">
+                                                        <input 
+                                                            type="radio" 
+                                                            name="answer" 
+                                                            value="${optionLetter}" 
+                                                            ${isSelected ? 'checked' : ''}
+                                                            onchange="handleAnswerSelect('${optionLetter}')"
+                                                            class="w-4 h-4"
+                                                        >
+                                                        <span class="flex-1">${optionLetter}. ${option}</span>
+                                                    </label>
+                                                `;
+                                            }).join('')}
+                                        </div>
+
+                                        <div class="flex flex-col sm:flex-row justify-between items-center gap-4 pt-4 border-t">
+                                            <button 
+                                                onclick="previousQuestion()" 
+                                                ${currentQuestion === 0 ? 'disabled' : ''}
+                                                class="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                Sebelumnya
+                                            </button>
+
+                                            <div class="flex gap-2">
+                                                ${currentQuestion < allQuestions.length - 1 ? `
+                                                    <button onclick="nextQuestion()" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                                                        Selanjutnya
+                                                        <svg class="w-4 h-4 inline ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                                        </svg>
+                                                    </button>
+                                                ` : ''}
+                                                <button onclick="submitExam()" class="px-6 py-2 ${currentQuestion === allQuestions.length - 1 ? 'bg-red-600 hover:bg-red-700' : 'bg-orange-600 hover:bg-orange-700'} text-white rounded-lg transition">
+                                                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                                    </svg>
+                                                    ${currentQuestion === allQuestions.length - 1 ? 'Selesai & Nilai' : 'Selesai'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Navigation Panel -->
+                            <div class="lg:w-80">
+                                <div class="bg-white shadow-lg rounded-lg p-4 sticky top-4">
+                                    <h3 class="font-semibold mb-4 text-center">Navigasi Soal</h3>
+                                    
+                                    <!-- Legend -->
+                                    <div class="flex flex-wrap justify-center gap-3 mb-4 text-xs">
+                                        <div class="flex items-center space-x-1">
+                                            <div class="w-4 h-4 bg-blue-500 rounded"></div>
+                                            <span>Dijawab</span>
+                                        </div>
+                                        <div class="flex items-center space-x-1">
+                                            <div class="w-4 h-4 border-2 border-gray-400 bg-gray-100 rounded"></div>
+                                            <span>Aktif</span>
+                                        </div>
+                                        <div class="flex items-center space-x-1">
+                                            <div class="w-4 h-4 bg-gray-50 border border-gray-200 rounded"></div>
+                                            <span>Belum</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Question Grid -->
+                                    <div class="grid grid-cols-7 gap-2 mb-4 max-h-96 overflow-y-auto scrollbar-thin">
+                                        ${allQuestions.map((_, index) => {
+                                            const status = getQuestionStatus(index);
+                                            const isAnswered = status === 'answered';
+                                            const isCurrent = status === 'current';
+                                            
+                                            return `
+                                                <button 
+                                                    onclick="goToQuestion(${index})" 
+                                                    class="aspect-square p-0 rounded text-xs font-medium transition-all hover:scale-105 ${
+                                                        isAnswered ? 'bg-blue-500 text-white shadow-sm' : 
+                                                        isCurrent ? 'border-2 border-gray-400 bg-gray-100 text-gray-800 font-bold' : 
+                                                        'bg-gray-50 border border-gray-200 text-gray-600 hover:bg-gray-100'
+                                                    }"
+                                                    title="Soal ${index + 1}${isAnswered ? ' - Sudah dijawab' : isCurrent ? ' - Soal aktif' : ' - Belum dijawab'}"
+                                                >
+                                                    ${index + 1}
+                                                </button>
+                                            `;
+                                        }).join('')}
+                                    </div>
+
+                                    <!-- Statistics -->
+                                    <div class="border-t pt-4">
+                                        <div class="grid grid-cols-2 gap-4 text-sm">
+                                            <div class="text-center">
+                                                <div class="text-lg font-bold text-blue-600">${Object.keys(userAnswers).length}</div>
+                                                <div class="text-xs text-gray-500">Dijawab</div>
+                                            </div>
+                                            <div class="text-center">
+                                                <div class="text-lg font-bold text-gray-600">${allQuestions.length - Object.keys(userAnswers).length}</div>
+                                                <div class="text-xs text-gray-500">Belum</div>
+                                            </div>
+                                        </div>
+                                        <div class="mt-3">
+                                            <div class="w-full bg-gray-200 rounded-full h-2">
+                                                <div class="bg-green-500 h-2 rounded-full transition-all duration-300" style="width: ${progress}%"></div>
+                                            </div>
+                                            <p class="text-xs text-gray-500 mt-1 text-center">Progress: ${Math.round(progress)}%</p>
+                                        </div>
+                                    </div>
+
+                                    <!-- Quick Submit Button -->
+                                    <div class="border-t pt-4 mt-4">
+                                        <button onclick="submitExam()" class="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm font-medium">
+                                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            Selesai & Nilai
+                                        </button>
+                                    </div>
+
+                                    <!-- Category Breakdown -->
+                                    <div class="border-t pt-4 mt-4">
+                                        <h4 class="font-medium text-sm mb-2">Kategori:</h4>
+                                        <div class="space-y-2 text-xs">
+                                            <div class="flex justify-between items-center">
+                                                <span class="text-blue-700">Teknis:</span>
+                                                <span class="font-medium">1-50</span>
+                                            </div>
+                                            <div class="flex justify-between items-center">
+                                                <span class="text-purple-700">Mansoskul:</span>
+                                                <span class="font-medium">51-70</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderResultsScreen = () => {
+            return `
+                <div class="min-h-screen bg-gray-50 p-4">
+                    <div class="max-w-6xl mx-auto">
+                        <!-- Summary Card -->
+                        <div class="bg-white shadow-xl rounded-lg mb-6">
+                            <div class="p-6 text-center border-b">
+                                <h1 class="text-3xl font-bold text-blue-900 mb-2">Hasil Try Out</h1>
+                                <p class="text-gray-600">Waktu Pengerjaan: ${formatTime(examResult.timeSpent)}</p>
+                            </div>
+                            <div class="p-6 space-y-6">
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div class="bg-blue-50 p-4 rounded-lg text-center">
+                                        <div class="text-2xl font-bold text-blue-600">${examResult.totalScore}</div>
+                                        <div class="text-sm text-blue-800">Skor Total</div>
+                                        <div class="text-xs text-blue-600">${examResult.percentage}% (${examResult.correctAnswers}/${examResult.totalQuestions})</div>
+                                    </div>
+                                    <div class="bg-green-50 p-4 rounded-lg text-center">
+                                        <div class="text-2xl font-bold text-green-600">${examResult.technisScore}</div>
+                                        <div class="text-sm text-green-800">Teknis</div>
+                                        <div class="text-xs text-green-600">${examResult.technisCorrect}/${examResult.technisTotal}</div>
+                                    </div>
+                                    <div class="bg-purple-50 p-4 rounded-lg text-center">
+                                        <div class="text-2xl font-bold text-purple-600">${examResult.mansoskulScore}</div>
+                                        <div class="text-sm text-purple-800">Mansoskul</div>
+                                        <div class="text-xs text-purple-600">${examResult.mansoskulCorrect}/${examResult.mansoskulTotal}</div>
+                                    </div>
+                                </div>
+
+                                <div class="flex flex-col sm:flex-row gap-3">
+                                    <button onclick="exportToCSV()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+                                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                        </svg>
+                                        Export CSV
+                                    </button>
+                                    <button onclick="exportToPDF()" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition">
+                                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                        </svg>
+                                        Download Hasil & Pembahasan (PDF)
+                                    </button>
+                                    <button onclick="resetExam()" class="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition">
+                                        Try Out Baru
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Detailed Results -->
+                        <div id="results-content" class="space-y-4">
+                            <h2 class="text-2xl font-bold text-gray-800 mb-4">Rincian Jawaban & Pembahasan</h2>
+                            ${examResult.userAnswers.map((answer, index) => {
+                                const question = allQuestions[index];
+                                const isExpanded = expandedCards[index];
+                                
+                                return `
+                                    <div class="bg-white shadow-md rounded-lg fade-in">
+                                        <div class="p-6">
+                                            <div class="flex items-start justify-between mb-4">
+                                                <div class="flex items-center space-x-3">
+                                                    <span class="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm">
+                                                        Soal ${answer.questionNumber}
+                                                    </span>
+                                                    <span class="px-3 py-1 ${answer.section === 'Teknis' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'} rounded-full text-sm">
+                                                        ${answer.section}
+                                                    </span>
+                                                    ${answer.isCorrect ? `
+                                                        <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm">
+                                                            <svg class="w-3 h-3 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                                            </svg>
+                                                            BENAR
+                                                        </span>
+                                                    ` : `
+                                                        <span class="px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm">
+                                                            <svg class="w-3 h-3 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+                                                            </svg>
+                                                            SALAH
+                                                        </span>
+                                                    `}
+                                                </div>
+                                            </div>
+
+                                            <div class="space-y-4">
+                                                <div>
+                                                    <h4 class="font-semibold text-gray-800 mb-2">Soal:</h4>
+                                                    <p class="text-gray-700 leading-relaxed">
+                                                        ${isExpanded ? answer.question : truncateText(answer.question)}
+                                                    </p>
+                                                    ${answer.question.split('\n').length > 3 ? `
+                                                        <button 
+                                                            onclick="toggleCardExpansion(${index})" 
+                                                            class="mt-2 text-blue-600 hover:text-blue-800 text-sm"
+                                                        >
+                                                            ${isExpanded ? `
+                                                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"></path>
+                                                                </svg>
+                                                                Sembunyikan
+                                                            ` : `
+                                                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                                                </svg>
+                                                                Lihat Selengkapnya
+                                                            `}
+                                                        </button>
+                                                    ` : ''}
+                                                </div>
+
+                                                <div>
+                                                    <h4 class="font-semibold text-gray-800 mb-2">Pilihan Jawaban:</h4>
+                                                    <div class="space-y-2">
+                                                        ${question.options.map((option, optIndex) => {
+                                                            const optionLetter = String.fromCharCode(65 + optIndex);
+                                                            const isCorrect = optionLetter === question.correctAnswer;
+                                                            const isSelected = optionLetter === answer.selectedAnswer;
+                                                            
+                                                            return `
+                                                                <div class="p-3 rounded-lg border ${
+                                                                    isCorrect
+                                                                        ? 'bg-green-50 border-green-200'
+                                                                        : isSelected
+                                                                        ? 'bg-blue-50 border-blue-200'
+                                                                        : 'bg-gray-50 border-gray-200'
+                                                                }">
+                                                                    <div class="flex items-center space-x-2">
+                                                                        <span class="font-medium">${optionLetter}.</span>
+                                                                        <span class="flex-1">${option}</span>
+                                                                        ${isCorrect ? `
+                                                                            <svg class="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                                                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                                                            </svg>
+                                                                        ` : ''}
+                                                                        ${isSelected && !isCorrect ? `
+                                                                            <svg class="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                                                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+                                                                            </svg>
+                                                                        ` : ''}
+                                                                    </div>
+                                                                </div>
+                                                            `;
+                                                        }).join('')}
+                                                    </div>
+                                                </div>
+
+                                                <div class="border-t pt-4">
+                                                    <div class="grid md:grid-cols-2 gap-4">
+                                                        <div>
+                                                            <h4 class="font-semibold text-gray-800 mb-2 flex items-center">
+                                                                📝 Jawaban Anda:
+                                                                ${!answer.isCorrect ? '<span class="ml-2 text-xs bg-red-100 text-red-700 px-2 py-1 rounded">Salah</span>' : '<span class="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded">Benar</span>'}
+                                                            </h4>
+                                                            <div class="${answer.isCorrect ? 'bg-green-50' : 'bg-red-50'} p-3 rounded-lg">
+                                                                <p class="font-medium ${answer.isCorrect ? 'text-green-800' : 'text-red-800'}">(${answer.selectedAnswer}) ${answer.selectedAnswerText}</p>
+                                                            </div>
+                                                        </div>
+                                                        <div>
+                                                            <h4 class="font-semibold text-gray-800 mb-2 flex items-center">
+                                                                ✅ Jawaban Benar:
+                                                            </h4>
+                                                            <div class="bg-green-50 p-3 rounded-lg">
+                                                                <p class="font-medium text-green-800">(${question.correctAnswer}) ${answer.correctAnswerText}</p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                ${question.pembahasan ? `
+                                                    <div class="border-t pt-4">
+                                                        <div class="bg-yellow-50 p-4 rounded-lg">
+                                                            <h4 class="font-semibold text-yellow-800 mb-2 flex items-center">
+                                                                💡 Pembahasan:
+                                                            </h4>
+                                                            <p class="text-yellow-700 leading-relaxed">
+                                                                ${isExpanded || question.pembahasan.split('\n').length <= 3
+                                                                    ? question.pembahasan
+                                                                    : truncateText(question.pembahasan)}
+                                                            </p>
+                                                            ${question.pembahasan.split('\n').length > 3 && !isExpanded ? `
+                                                                <button 
+                                                                    onclick="toggleCardExpansion(${index})" 
+                                                                    class="mt-2 text-yellow-700 hover:text-yellow-900 text-sm"
+                                                                >
+                                                                    <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                                                    </svg>
+                                                                    Lihat Selengkapnya
+                                                                </button>
+                                                            ` : ''}
+                                                        </div>
+                                                    </div>
+                                                ` : ''}
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+
+        // Main render function
+        const render = () => {
+            const app = document.getElementById('app');
+            
+            if (teknisQuestions.length === 0 && mansoskulQuestions.length === 0) {
+                app.innerHTML = renderUploadScreen();
+            } else if (!isExamStarted && teknisQuestions.length > 0 && mansoskulQuestions.length > 0) {
+                app.innerHTML = renderConfirmScreen();
+            } else if (showResult && examResult) {
+                app.innerHTML = renderResultsScreen();
+            } else if (isExamStarted && allQuestions.length > 0) {
+                app.innerHTML = renderExamScreen();
+            } else {
+                app.innerHTML = renderUploadScreen();
+            }
+        };
+
+        // Initialize app
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSavedState();
+            render();
+        });
+    </script>
+</body>
+</html>
