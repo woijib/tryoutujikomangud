@@ -141,14 +141,26 @@
 
                     const parsedQuestions = jsonData
                         .filter(row => row[0] && typeof row[0] === 'number')
-                        .map(row => ({
-                            nomor: row[0],
-                            soal: row[1] || '',
-                            options: [row[2] || '', row[3] || '', row[4] || '', row[5] || ''],
-                            correctAnswer: row[6] || '',
-                            pembahasan: row[7] || '',
-                            category: type === 'teknis' ? 'Teknis' : 'Mansoskul'
-                        }));
+                        .map(row => {
+                            // Clean correct answer - ensure it's a single uppercase letter
+                            let correctAnswer = (row[6] || '').toString().trim().toUpperCase();
+                            if (correctAnswer.length > 1) {
+                                correctAnswer = correctAnswer.charAt(0);
+                            }
+                            // Validate it's A-D
+                            if (!['A', 'B', 'C', 'D'].includes(correctAnswer)) {
+                                correctAnswer = 'A'; // Default fallback
+                            }
+                            
+                            return {
+                                nomor: row[0],
+                                soal: row[1] || '',
+                                options: [row[2] || '', row[3] || '', row[4] || '', row[5] || ''],
+                                correctAnswer: correctAnswer,
+                                pembahasan: row[7] || '',
+                                category: type === 'teknis' ? 'Teknis' : 'Mansoskul'
+                            };
+                        });
 
                     if (parsedQuestions.length === 0) {
                         uploadError = `Tidak ada soal ${type} yang valid ditemukan dalam file.`;
@@ -319,9 +331,13 @@
                     if (isCorrect) mansoskulCorrect++;
                 }
 
-                const selectedAnswerText = userAnswer ? 
-                    question.options[question.correctAnswer.charCodeAt(0) - 65] : 'Tidak dijawab';
-                const correctAnswerText = question.options[question.correctAnswer.charCodeAt(0) - 65];
+                const selectedAnswerText = userAnswer && userAnswer.length === 1 && 
+                    userAnswer >= 'A' && userAnswer <= 'Z' && 
+                    question.options[userAnswer.charCodeAt(0) - 65] ? 
+                    question.options[userAnswer.charCodeAt(0) - 65] : 'Tidak dijawab';
+                const correctAnswerText = question.correctAnswer && 
+                    question.options[question.correctAnswer.charCodeAt(0) - 65] ? 
+                    question.options[question.correctAnswer.charCodeAt(0) - 65] : 'Tidak ada jawaban benar';
 
                 userAnswersList.push({
                     questionNumber: question.nomor,
@@ -356,10 +372,6 @@
         };
 
         const submitExam = () => {
-            console.log('submitExam called');
-            console.log('allQuestions:', allQuestions.length);
-            console.log('userAnswers:', userAnswers);
-            
             const answeredCount = Object.keys(userAnswers).length;
             const totalCount = allQuestions.length;
             const unansweredCount = totalCount - answeredCount;
@@ -378,16 +390,12 @@
             confirmMessage += `Yakin ingin melanjutkan?`;
             
             if (confirm(confirmMessage)) {
-                console.log('User confirmed submission');
                 const result = calculateResults();
-                console.log('Results calculated:', result);
                 examResult = result;
                 showResult = true;
                 stopTimer();
                 localStorage.removeItem('tryoutState');
                 render();
-            } else {
-                console.log('User cancelled submission');
             }
         };
 
@@ -1106,13 +1114,18 @@
                                                 <div class="border-t pt-4">
                                                     <div class="grid md:grid-cols-2 gap-4">
                                                         <div>
-                                                            <h4 class="font-semibold text-gray-800 mb-2">Jawaban Anda:</h4>
-                                                            <div class="bg-blue-50 p-3 rounded-lg">
-                                                                <p class="font-medium text-blue-800">(${answer.selectedAnswer}) ${answer.selectedAnswerText}</p>
+                                                            <h4 class="font-semibold text-gray-800 mb-2 flex items-center">
+                                                                📝 Jawaban Anda:
+                                                                ${!answer.isCorrect ? '<span class="ml-2 text-xs bg-red-100 text-red-700 px-2 py-1 rounded">Salah</span>' : '<span class="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded">Benar</span>'}
+                                                            </h4>
+                                                            <div class="${answer.isCorrect ? 'bg-green-50' : 'bg-red-50'} p-3 rounded-lg">
+                                                                <p class="font-medium ${answer.isCorrect ? 'text-green-800' : 'text-red-800'}">(${answer.selectedAnswer}) ${answer.selectedAnswerText}</p>
                                                             </div>
                                                         </div>
                                                         <div>
-                                                            <h4 class="font-semibold text-gray-800 mb-2">Jawaban Benar:</h4>
+                                                            <h4 class="font-semibold text-gray-800 mb-2 flex items-center">
+                                                                ✅ Jawaban Benar:
+                                                            </h4>
                                                             <div class="bg-green-50 p-3 rounded-lg">
                                                                 <p class="font-medium text-green-800">(${question.correctAnswer}) ${answer.correctAnswerText}</p>
                                                             </div>
